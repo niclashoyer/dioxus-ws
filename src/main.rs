@@ -1,5 +1,5 @@
 use dioxus::{
-    logger::tracing::{debug, error, warn},
+    logger::tracing::{debug, error, info, warn},
     prelude::*,
 };
 use futures::{SinkExt, StreamExt, channel::mpsc};
@@ -38,7 +38,8 @@ fn App() -> Element {
             button {
                 class: "p-4 bg-gray-800 text-white cursor-pointer rounded-lg",
                 onclick: move |_e| async move {
-                    tx().unwrap().send(Ok("button clicked!".into())).await.expect("send failed");
+                    info!("sending...");
+                    tx().unwrap().try_send(Ok("button clicked!".into())).expect("send failed");
                 },
                 "Send something!"
             }
@@ -60,7 +61,7 @@ pub async fn echo(
         while let Some(i) = input.next().await {
             match i {
                 Ok(s) => {
-                    tx.send(Ok(s)).await.unwrap();
+                    tx.try_send(Ok(s)).unwrap();
                 }
                 Err(e) => {
                     error!("{e}");
