@@ -22,16 +22,7 @@ struct UseDocument {
 
 fn use_document(key: ReadOnlySignal<String>) -> UseDocument {
     let mut doc = use_signal(|| LoroDoc::new());
-    use_memo(move || {
-        #[cfg(feature = "web")]
-        {
-            let doc2 = LoroDoc::new();
-            if let Some(bytes) = load_document_bytes(&key()) {
-                doc2.import(&bytes).expect("import failed");
-            }
-            doc.set(doc2);
-        }
-    });
+
     UseDocument {
         doc: doc.into(),
         key,
@@ -42,117 +33,6 @@ impl UseDocument {
     fn save(&self) {
         save_document(&(self.key)(), (self.doc)());
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct UseDocumentText {
-    pub text: SyncSignal<LoroText>,
-    sub: Signal<Subscription>,
-}
-
-impl UseDocumentText {
-    pub fn insert(&mut self, pos: usize, s: &str) -> LoroResult<()> {
-        self.text.write().insert(pos, s)
-    }
-
-    pub fn to_string(&self) -> String {
-        self.text.read().to_string()
-    }
-}
-
-fn use_document_text<D: Into<ReadOnlySignal<LoroDoc>>, I: IntoContainerId>(
-    doc: D,
-    id: I,
-) -> UseDocumentText {
-    use_hook(|| {
-        let doc = doc.into();
-        let text = SyncSignal::new_maybe_sync(doc.read().get_text(id));
-        debug!("{:?}", text);
-        let sub = doc.read().subscribe(
-            &text.read().id(),
-            Arc::new(move |_e| {
-                debug!("UseDocumentText subscriber");
-                to_owned![text];
-                text.write_unchecked();
-            }),
-        );
-        let sub = Signal::new(sub);
-        UseDocumentText { text, sub }
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct UseDocumentMap {
-    pub map: SyncSignal<LoroMap>,
-    sub: Signal<Subscription>,
-}
-
-fn use_document_map<D: Into<ReadOnlySignal<LoroDoc>>, I: IntoContainerId + Clone + 'static>(
-    doc: D,
-    id: I,
-) -> Memo<UseDocumentMap> {
-    let doc = doc.into();
-    let mut map = use_hook(|| SyncSignal::new_maybe_sync(LoroMap::new()));
-    use_memo(move || {
-        to_owned![id];
-        map.set(doc.try_read().expect("use_document_map failed").get_map(id));
-        let sub = doc.read().subscribe(
-            &map.read().id(),
-            Arc::new(move |_e| {
-                debug!("map subscriber");
-                to_owned![map];
-                map.write_unchecked();
-            }),
-        );
-        let sub = Signal::new(sub);
-        UseDocumentMap { map, sub }
-    })
-}
-
-fn use_map_value(map: UseDocumentMap, key: &'static str) -> Memo<Option<LoroValue>> {
-    use_memo(move || {
-        let vc = map.map.read().get(key);
-        if let Some(ValueOrContainer::Value(val)) = vc {
-            Some(val)
-        } else {
-            None
-        }
-    })
-}
-
-fn use_map_string(map: UseDocumentMap, key: &'static str) -> Memo<String> {
-    let val = use_map_value(map, key);
-    use_memo(move || {
-        if let Some(LoroValue::String(s)) = val() {
-            (*s).clone()
-        } else {
-            "".into()
-        }
-    })
-}
-
-fn use_map_string_mut(map: UseDocumentMap, key: &'static str) -> Signal<String> {
-    let mut sig = use_signal(|| "".into());
-    let val = use_map_value(map, key);
-    use_memo(move || {
-        let val = val();
-        let s = if let Some(LoroValue::String(s)) = val {
-            (*s).clone()
-        } else {
-            "".into()
-        };
-        if *sig.peek() != s {
-            sig.set(s);
-        }
-    });
-    use_memo(move || {
-        let val: String = sig();
-        map.map
-            .write_unchecked()
-            .insert(key, LoroValue::String(val.into()))
-            .expect("inserting string failed");
-    });
-    sig
 }
 
 fn save_document(key: &str, doc: LoroDoc) {
@@ -187,27 +67,12 @@ fn load_document_bytes(key: &str) -> Option<Vec<u8>> {
 fn Example() -> Element {
     let key = use_signal(|| "foodoc".into());
     let doc = use_document(key.into());
-    let mut text = use_document_text(doc.doc, "foo");
-    let map = use_document_map(doc.doc, "bar");
-    let mut string = use_map_string_mut(map(), "baz");
     rsx! {
         div {
             div {
                 class: "p-4",
                 p {
-                    { format!("foo: {}", text.to_string()) }
-                }
-                p {
-                    { format!("baz: {}", string) }
-                }
-                p {
-                    { format!("baz map: {:?}", map().map.read().get("baz")) }
-                }
-                input {
-                    class: "bg-gray-200 rounded-md p-2 mt-2",
-                    type: "text",
-                    oninput: move |e| string.set(e.value()),
-                    value: string
+                    { format!("doc map string: {:?}", (doc.doc)().get_by_str_path("map/foobar").map(|x| x.as_value()).map(|x| x.unwrap().as_string()).map(|x| x.unwrap().as_str())) }
                 }
             }
             div {
@@ -216,32 +81,11 @@ fn Example() -> Element {
                 button {
                     class: "p-4 rounded-lg bg-gray-200 cursor-pointer",
                     onclick: move |_e| {
-                        text.insert(0, "foo").expect("foo failed");
-                    },
-                    "add foo"
-                }
-                button {
-                    class: "p-4 rounded-lg bg-gray-200 cursor-pointer",
-                    onclick: move |_e| {
                         let doc2 = LoroDoc::new();
                         doc2.import(&doc.doc.read().export(loro::ExportMode::Snapshot).unwrap()).expect("import failed");
                         doc.doc.read().import(&doc2.export(loro::ExportMode::Snapshot).unwrap()).expect("import failed");
                     },
                     "reimport"
-                }
-                button {
-                    class: "p-4 rounded-lg bg-gray-200 cursor-pointer",
-                    onclick: move |_e| {
-                        map().map.write_unchecked().insert("baz", "buz").expect("baz failed");
-                    },
-                    "baz"
-                }
-                button {
-                    class: "p-4 rounded-lg bg-gray-200 cursor-pointer",
-                    onclick: move |_e| {
-                        string.set("boz".into());
-                    },
-                    "boz"
                 }
                 button {
                     class: "p-4 rounded-lg bg-gray-200 cursor-pointer",
