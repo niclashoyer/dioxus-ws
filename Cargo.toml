@@ -14,6 +14,9 @@ loro = "1.5.1"
 getrandom = { version = "^0.3.3" }
 tokio = { version = "1.45.0", optional = true }
 gloo-storage = "0.3.0"
+futures-channel = "0.3.31"
+async-broadcast = "0.7.2"
+async-channel = "2.3.1"
 
 [features]
 default = ["web"]
