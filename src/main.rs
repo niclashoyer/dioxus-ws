@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{any::Any, error::Error, sync::Arc};
+use std::{any::Any, error::Error, sync::Arc, time::Duration};
 
 use dioxus::{
     logger::tracing::{debug, error, info, warn},
@@ -105,7 +105,7 @@ impl UseDocument {
     }
 }
 
-fn use_document_value<T: ToLoro + FromLoro + Default + fmt::Debug>(
+fn use_document_value<T: ToLoro + FromLoro + Default + fmt::Debug + PartialEq>(
     mut doc: UseDocument,
 ) -> Signal<T> {
     let mut value = use_signal(|| T::default());
@@ -125,7 +125,10 @@ fn use_document_value<T: ToLoro + FromLoro + Default + fmt::Debug>(
                 )
                 .unwrap(); // FIXME
                 debug!("value: {:?}", new_value);
-                value.set(new_value);
+                // prevent unnecessary rerenders
+                if *value.peek() != new_value {
+                    value.set(new_value);
+                }
             }
         });
     });
@@ -147,7 +150,7 @@ trait FromLoro: Sized {
     fn from_loro(doc: &LoroDoc, diff: Option<DiffEvent>) -> Result<Self, Box<dyn Error>>;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 struct Foobar(String);
 
 impl ToLoro for Foobar {
@@ -232,8 +235,9 @@ fn Example() -> Element {
                 button {
                     class: "p-4 rounded-lg bg-gray-200 cursor-pointer",
                     onclick: move |_e| {
-                        doc.doc.read().as_ref().unwrap().get_loro_doc().get_map("foomap").insert("foobar", "foobar!").expect("string change failed");
+                        doc.doc.read().as_ref().unwrap().get_loro_doc().get_map("foobar").insert("foobar", "foobar!").expect("string change failed");
                         debug!("doc: {}", doc.doc.read().as_ref().unwrap().get_loro_doc().get_deep_value().to_json_value());
+                        doc.doc.read().as_ref().unwrap().get_loro_doc().commit();
                     },
                     "change string in document"
                 }

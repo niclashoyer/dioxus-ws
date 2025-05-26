@@ -54,6 +54,7 @@ pub mod web {
         }
 
         async fn load_document(&mut self, id: &DocumentId) -> Document {
+            #[allow(unused_variables)]
             let bytes: Option<Vec<u8>> = None;
             #[cfg(feature = "web")]
             let bytes = self.load_document_bytes(id).await;
