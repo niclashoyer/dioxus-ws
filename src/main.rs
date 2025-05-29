@@ -1,30 +1,62 @@
 use core::fmt;
-use std::{any::Any, error::Error, sync::Arc, time::Duration};
+use std::{error::Error, sync::Arc};
 
+use async_broadcast::{InactiveReceiver, Receiver, Sender, broadcast};
 use dioxus::{
     logger::tracing::{debug, error, info, warn},
-    prelude::*,
+    prelude::{
+        server_fn::{BoxedStream, Websocket, codec::JsonEncoding},
+        *,
+    },
 };
-use futures::{SinkExt, StreamExt, channel::mpsc};
-use loro::{
-    ContainerID, ContainerTrait, ExportMode, IntoContainerId, LoroDoc, LoroMap, LoroResult,
-    LoroText, LoroValue, Subscription, ToJson, ValueOrContainer, event::Subscriber,
-};
-// use server_fn::{BoxedStream, Websocket, codec::JsonEncoding};
-use async_broadcast::{InactiveReceiver, Receiver, SendError, Sender, TrySendError, broadcast};
+use futures::{StreamExt, channel::mpsc};
+use loro::{ContainerID, LoroDoc, ToJson};
 
 mod storage;
-use storage::{Document, DocumentId, Storage};
+use storage::{Document, DocumentId, Storage, web::SessionStorage};
 
 fn main() {
     dioxus::launch(App);
 }
 
-fn use_load_document(id: ReadOnlySignal<DocumentId>) -> Result<Resource<Document>, RenderError> {
+#[derive(Debug)]
+struct UseStorage<S: Storage + 'static> {
+    storage: Signal<S>,
+}
+
+impl<S: Storage + 'static> Clone for UseStorage<S> {
+    fn clone(&self) -> Self {
+        UseStorage {
+            storage: self.storage.clone(),
+        }
+    }
+}
+
+impl<S: Storage + 'static> Copy for UseStorage<S> {}
+
+fn use_storage<S: Storage>() -> UseStorage<S> {
+    UseStorage {
+        storage: use_signal(|| S::new()),
+    }
+}
+
+impl<S: Storage> UseStorage<S> {
+    async fn load_document(&self, id: &DocumentId) -> Document {
+        self.storage.peek().load_document(id).await
+    }
+
+    async fn save_document(&self, doc: &Document) {
+        self.storage.peek().save_document(doc).await;
+    }
+}
+
+fn use_load_document<S: Storage + 'static>(
+    storage: UseStorage<S>,
+    id: ReadOnlySignal<DocumentId>,
+) -> Result<Resource<Document>, RenderError> {
     debug!("use_document");
     let resource = use_resource(move || async move {
         debug!("use_document/use_resource");
-        let mut storage = storage::web::SessionStorage::default(); // FIXME: refactor this into a context or static
         storage.load_document(&id()).await
     });
 
@@ -61,7 +93,12 @@ struct UseDocument {
     inactive_receiver: Signal<InactiveReceiver<DiffEvent>>,
 }
 
-fn use_document(doc: ReadOnlySignal<Option<Document>>) -> UseDocument {
+fn use_document<S: Storage + 'static>(
+    storage: UseStorage<S>,
+    id: ReadOnlySignal<DocumentId>,
+) -> Result<UseDocument, RenderError> {
+    let session_storage = use_storage::<S>();
+    let doc = use_load_document(session_storage, id)?;
     let mut subscription = use_signal(|| None);
     let (tx, rx): (SyncSignal<Sender<DiffEvent>>, Signal<_>) = use_hook(|| {
         let (tx, rx) = broadcast::<DiffEvent>(1);
@@ -93,10 +130,10 @@ fn use_document(doc: ReadOnlySignal<Option<Document>>) -> UseDocument {
             }
         }
     });
-    UseDocument {
-        doc,
+    Ok(UseDocument {
+        doc: doc.into(),
         inactive_receiver: rx,
-    }
+    })
 }
 
 impl UseDocument {
@@ -182,16 +219,13 @@ impl FromLoro for Foobar {
 #[component]
 fn Example() -> Element {
     let mut id = use_signal(|| "foodoc".into());
-    let doc_resource = use_load_document(id.into())?;
-    let doc = use_document(doc_resource.value());
+    let session_storage = use_storage::<SessionStorage>();
+    let doc = use_document(session_storage, id.into())?;
     let mut foobar: Signal<Foobar> = use_document_value(doc);
     rsx! {
         div {
             div {
                 class: "p-4",
-                p {
-                    // { debug!("render: {}", string.s.read()); format!("string: {}", string.s.read()) }
-                }
                 input {
                     class: "rounded-md bg-gray-100 p-2 min-w-24",
                     value: id,
@@ -199,13 +233,6 @@ fn Example() -> Element {
                         id.set(e.value())
                     }
                 }
-                // input {
-                //     class: "rounded-md bg-gray-100 p-2 min-w-24",
-                //     value: string.s,
-                //     onchange: move |e| {
-                //         string.s.set(e.value())
-                //     }
-                // }
             }
             div {
                 class: "p-4",
@@ -223,15 +250,6 @@ fn Example() -> Element {
             div {
                 class: "flex gap-4",
 
-                // button {
-                //     class: "p-4 rounded-lg bg-gray-200 cursor-pointer",
-                //     onclick: move |_e| {
-                //         let doc2 = LoroDoc::new();
-                //         doc2.import(&doc.doc.read().export(loro::ExportMode::Snapshot).unwrap()).expect("import failed");
-                //         doc.doc.read().import(&doc2.export(loro::ExportMode::Snapshot).unwrap()).expect("import failed");
-                //     },
-                //     "reimport"
-                // }
                 button {
                     class: "p-4 rounded-lg bg-gray-200 cursor-pointer",
                     onclick: move |_e| {
@@ -244,8 +262,7 @@ fn Example() -> Element {
                 button {
                     class: "p-4 rounded-lg bg-gray-200 cursor-pointer",
                     onclick: move |_e| async move {
-                        let mut storage = storage::web::SessionStorage::default(); // FIXME: refactor this into a context or static
-                        storage.save_document(doc.doc.read().as_ref().unwrap()).await;
+                        session_storage.save_document(doc.doc.read().as_ref().unwrap()).await;
                     },
                     "save"
                 }
@@ -256,21 +273,21 @@ fn Example() -> Element {
 
 #[component]
 fn App() -> Element {
-    // let mut tx = use_signal(|| None);
-    // spawn(async move {
-    //     let (tx_, rx) = mpsc::channel(1);
-    //     tx.set(Some(tx_));
-    //     match echo(rx.into()).await {
-    //         Ok(mut msgs) => {
-    //             while let Some(msg) = msgs.next().await {
-    //                 debug!("received from server: {:?}", msg);
-    //             }
-    //         }
-    //         Err(e) => {
-    //             warn!("{e}")
-    //         }
-    //     }
-    // });
+    let mut tx = use_signal(|| None);
+    spawn(async move {
+        let (tx_, rx) = mpsc::channel(1);
+        tx.set(Some(tx_));
+        match echo(rx.into()).await {
+            Ok(mut msgs) => {
+                while let Some(msg) = msgs.next().await {
+                    debug!("received from server: {:?}", msg);
+                }
+            }
+            Err(e) => {
+                warn!("{e}")
+            }
+        }
+    });
 
     rsx! {
         document::Script {
@@ -280,14 +297,14 @@ fn App() -> Element {
         div {
             class: "p-8",
 
-            // button {
-            //     class: "p-4 bg-gray-800 text-white cursor-pointer rounded-lg",
-            //     onclick: move |_e| async move {
-            //         info!("sending...");
-            //         tx().unwrap().try_send(Ok("button clicked!".into())).expect("send failed");
-            //     },
-            //     "Send something!"
-            // }
+            button {
+                class: "p-4 bg-gray-800 text-white cursor-pointer rounded-lg",
+                onclick: move |_e| async move {
+                    info!("sending...");
+                    tx().unwrap().try_send(Ok("button clicked!".into())).expect("send failed");
+                },
+                "Send something!"
+            }
         }
 
         div {
@@ -298,28 +315,28 @@ fn App() -> Element {
     }
 }
 
-// #[server(protocol = Websocket<JsonEncoding, JsonEncoding>)]
-// pub async fn echo(
-//     input: BoxedStream<String, ServerFnError>,
-// ) -> Result<BoxedStream<String, ServerFnError>, ServerFnError> {
-//     use futures::channel::mpsc;
-//     use futures::{SinkExt, StreamExt};
-//     let mut input = input;
+#[server(protocol = Websocket<JsonEncoding, JsonEncoding>)]
+pub async fn echo(
+    input: BoxedStream<String, ServerFnError>,
+) -> Result<BoxedStream<String, ServerFnError>, ServerFnError> {
+    use futures::channel::mpsc;
+    use futures::{SinkExt, StreamExt};
+    let mut input = input;
 
-//     let (mut tx, rx) = mpsc::channel(1);
+    let (mut tx, rx) = mpsc::channel(1);
 
-//     tokio::spawn(async move {
-//         while let Some(i) = input.next().await {
-//             match i {
-//                 Ok(s) => {
-//                     tx.try_send(Ok(s)).unwrap();
-//                 }
-//                 Err(e) => {
-//                     error!("{e}");
-//                 }
-//             }
-//         }
-//     });
+    tokio::spawn(async move {
+        while let Some(i) = input.next().await {
+            match i {
+                Ok(s) => {
+                    tx.try_send(Ok(s)).unwrap();
+                }
+                Err(e) => {
+                    error!("{e}");
+                }
+            }
+        }
+    });
 
-//     Ok(rx.into())
-// }
+    Ok(rx.into())
+}

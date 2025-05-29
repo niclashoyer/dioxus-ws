@@ -3,8 +3,9 @@ use loro::LoroDoc;
 pub type DocumentId = String;
 
 pub trait Storage {
-    async fn load_document(&mut self, id: &DocumentId) -> Document;
-    async fn save_document(&mut self, doc: &Document);
+    fn new() -> Self;
+    async fn load_document(&self, id: &DocumentId) -> Document;
+    async fn save_document(&self, doc: &Document);
 }
 
 #[derive(Debug)]
@@ -44,7 +45,11 @@ pub mod web {
     }
 
     impl Storage for SessionStorage {
-        async fn save_document(&mut self, doc: &Document) {
+        fn new() -> Self {
+            Self {}
+        }
+
+        async fn save_document(&self, doc: &Document) {
             use gloo_storage::{SessionStorage, Storage};
             let bytes = doc
                 .doc
@@ -53,7 +58,7 @@ pub mod web {
             SessionStorage::set(doc.id.clone(), bytes).expect("save document failed");
         }
 
-        async fn load_document(&mut self, id: &DocumentId) -> Document {
+        async fn load_document(&self, id: &DocumentId) -> Document {
             #[allow(unused_variables)]
             let bytes: Option<Vec<u8>> = None;
             #[cfg(feature = "web")]
