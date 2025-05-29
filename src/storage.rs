@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use loro::LoroDoc;
 
 pub type DocumentId = String;
@@ -8,9 +10,9 @@ pub trait Storage {
     async fn save_document(&self, doc: &Document);
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Document {
-    pub(crate) doc: LoroDoc,
+    pub(crate) doc: Arc<LoroDoc>,
     pub(crate) id: DocumentId,
 }
 
@@ -69,7 +71,7 @@ pub mod web {
             }
             Document {
                 id: id.clone(),
-                doc,
+                doc: doc.into(),
             }
         }
     }

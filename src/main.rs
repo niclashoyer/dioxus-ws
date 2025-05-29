@@ -80,7 +80,7 @@ fn use_load_document<S: Storage + 'static>(
 }
 
 #[derive(Debug, Clone)]
-enum DiffEvent {
+pub enum DiffEvent {
     Load,
     Local(Option<ContainerID>),
     Import(Option<ContainerID>),
@@ -94,11 +94,10 @@ struct UseDocument {
 }
 
 fn use_document<S: Storage + 'static>(
-    storage: UseStorage<S>,
     id: ReadOnlySignal<DocumentId>,
 ) -> Result<UseDocument, RenderError> {
-    let session_storage = use_storage::<S>();
-    let doc = use_load_document(session_storage, id)?;
+    let storage = use_storage::<S>();
+    let doc = use_load_document(storage, id)?;
     let mut subscription = use_signal(|| None);
     let (tx, rx): (SyncSignal<Sender<DiffEvent>>, Signal<_>) = use_hook(|| {
         let (tx, rx) = broadcast::<DiffEvent>(1);
@@ -220,7 +219,7 @@ impl FromLoro for Foobar {
 fn Example() -> Element {
     let mut id = use_signal(|| "foodoc".into());
     let session_storage = use_storage::<SessionStorage>();
-    let doc = use_document(session_storage, id.into())?;
+    let doc = use_document::<SessionStorage>(id.into())?;
     let mut foobar: Signal<Foobar> = use_document_value(doc);
     rsx! {
         div {
@@ -319,8 +318,8 @@ fn App() -> Element {
 pub async fn echo(
     input: BoxedStream<String, ServerFnError>,
 ) -> Result<BoxedStream<String, ServerFnError>, ServerFnError> {
+    use futures::StreamExt;
     use futures::channel::mpsc;
-    use futures::{SinkExt, StreamExt};
     let mut input = input;
 
     let (mut tx, rx) = mpsc::channel(1);
