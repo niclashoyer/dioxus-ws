@@ -17,6 +17,8 @@ gloo-storage = "0.3.0"
 futures-channel = "0.3.31"
 async-broadcast = "0.7.2"
 gloo-timers = "0.3.0"
+uuid = { version = "1.17.0", features = ["v4", "v5", "js", "serde"] }
+serde = { version = "1.0.219", features = ["derive"] }
 
 [features]
 default = ["web"]

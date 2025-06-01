@@ -13,7 +13,8 @@ use futures::{StreamExt, channel::mpsc};
 use loro::{ContainerID, LoroDoc, ToJson};
 
 mod storage;
-use storage::{Document, DocumentId, Storage, web::SessionStorage};
+use storage::{Document, DocumentId, Storage, server::RemoteMemoryStorage, web::SessionStorage};
+use uuid::Uuid;
 
 fn main() {
     dioxus::launch(App);
@@ -41,42 +42,26 @@ fn use_storage<S: Storage>() -> UseStorage<S> {
 }
 
 impl<S: Storage> UseStorage<S> {
-    async fn load_document(&self, id: &DocumentId) -> Document {
-        self.storage.peek().load_document(id).await
+    async fn load_document(&mut self, id: &DocumentId) -> Document {
+        self.storage.write().load_document(id).await
     }
 
-    async fn save_document(&self, doc: &Document) {
-        self.storage.peek().save_document(doc).await;
+    async fn save_document(&mut self, doc: &Document) {
+        self.storage.write().save_document(doc).await;
     }
 }
 
 fn use_load_document<S: Storage + 'static>(
-    storage: UseStorage<S>,
+    mut storage: UseStorage<S>,
     id: ReadOnlySignal<DocumentId>,
-) -> Result<Resource<Document>, RenderError> {
-    debug!("use_document");
-    let resource = use_resource(move || async move {
-        debug!("use_document/use_resource");
-        storage.load_document(&id()).await
-    });
-
-    // This is a simple hack to check if the resource is ready on the first run. Taken from:
-    // https://docs.rs/dioxus-fullstack/0.6.3/src/dioxus_fullstack/hooks/server_future.rs.html#60-65
-    // On the first run, force this task to be polled right away in case its value is ready
-    use_hook(|| {
-        let _ = resource.task().poll_now();
-    });
-
-    // Suspend if the value isn't ready
-    if resource.state().cloned() == UseResourceState::Pending {
-        let task = resource.task();
-
-        if !task.paused() {
-            return Err(suspend(task).unwrap_err());
-        }
-    }
-
-    Ok(resource)
+) -> Resource<Document> {
+    debug!("use_load_document");
+    use_resource(move || async move {
+        debug!("use_load_document/use_resource");
+        let res = storage.load_document(&id()).await;
+        debug!("use_load_document/use_resource: result: {:?}", res);
+        res
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -89,24 +74,28 @@ pub enum DiffEvent {
 
 #[derive(Debug, Clone, Copy)]
 struct UseDocument {
-    doc: ReadOnlySignal<Option<Document>>,
+    doc: Resource<Document>,
     inactive_receiver: Signal<InactiveReceiver<DiffEvent>>,
 }
 
 fn use_document<S: Storage + 'static>(
     id: ReadOnlySignal<DocumentId>,
 ) -> Result<UseDocument, RenderError> {
+    debug!("use_document");
     let storage = use_storage::<S>();
-    let doc = use_load_document(storage, id)?;
+    let doc = use_load_document(storage, id);
     let mut subscription = use_signal(|| None);
     let (tx, rx): (SyncSignal<Sender<DiffEvent>>, Signal<_>) = use_hook(|| {
         let (tx, rx) = broadcast::<DiffEvent>(1);
         (Signal::new_maybe_sync(tx), Signal::new(rx.deactivate()))
     });
     use_memo(move || {
-        match &*doc.read_unchecked() {
+        debug!("use_document/use_memo");
+        match &*doc.value().read_unchecked() {
             Some(doc) => {
+                debug!("use_document/use_memo/read_unchecked");
                 let sub = doc.get_loro_doc().subscribe_root(Arc::new(move |e| {
+                    debug!("use_document/use_memo/subscribe_root");
                     let e = match e.triggered_by {
                         loro::EventTriggerKind::Local => DiffEvent::Local(e.current_target),
                         loro::EventTriggerKind::Checkout => DiffEvent::Checkout(e.current_target),
@@ -124,9 +113,7 @@ fn use_document<S: Storage + 'static>(
                         .expect("send load event failed");
                 });
             }
-            _ => {
-                // TODO: check for error, see https://docs.rs/dioxus/latest/dioxus/prelude/struct.Resource.html#method.value
-            }
+            _ => {}
         }
     });
     Ok(UseDocument {
@@ -169,11 +156,14 @@ fn use_document_value<T: ToLoro + FromLoro + Default + fmt::Debug + PartialEq>(
         });
     });
     use_effect(move || {
-        doc.doc.peek().as_ref().and_then(move |doc| {
+        // subscribe value even if the document is not ready yet
+        let _val = value.read();
+        if let Some(doc) = doc.doc.value().peek().as_ref() {
+            // when the value changes, write it into the document
+            // TODO: add compare check to prevent unnecessary writes
             value.read().to_loro(&doc.doc).ok();
             doc.doc.commit();
-            Some(())
-        });
+        };
     });
     value
 }
@@ -217,9 +207,15 @@ impl FromLoro for Foobar {
 
 #[component]
 fn Example() -> Element {
-    let mut id = use_signal(|| "foodoc".into());
-    let session_storage = use_storage::<SessionStorage>();
-    let doc = use_document::<SessionStorage>(id.into())?;
+    let mut id_str = use_signal(|| "foodoc".into());
+    let id = use_memo(move || {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("example.com/{}", id_str()).as_bytes(),
+        )
+    });
+    let mut storage = use_storage::<RemoteMemoryStorage>();
+    let doc = use_document::<RemoteMemoryStorage>(id.into())?;
     let mut foobar: Signal<Foobar> = use_document_value(doc);
     rsx! {
         div {
@@ -227,9 +223,9 @@ fn Example() -> Element {
                 class: "p-4",
                 input {
                     class: "rounded-md bg-gray-100 p-2 min-w-24",
-                    value: id,
+                    value: id_str,
                     onchange: move |e| {
-                        id.set(e.value())
+                        id_str.set(e.value())
                     }
                 }
             }
@@ -261,7 +257,11 @@ fn Example() -> Element {
                 button {
                     class: "p-4 rounded-lg bg-gray-200 cursor-pointer",
                     onclick: move |_e| async move {
-                        session_storage.save_document(doc.doc.read().as_ref().unwrap()).await;
+                        if let Some(doc) = doc.doc.read().as_ref() {
+                            storage.save_document(doc).await;
+                        } else {
+                            warn!("save: no document");
+                        }
                     },
                     "save"
                 }
